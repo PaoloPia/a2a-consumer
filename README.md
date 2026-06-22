@@ -1,4 +1,4 @@
-# A2A Consumer SPA
+# A2A Consumer
 
 A React single-page application for interacting with any A2A v1.0 compatible agent directly from the browser.
 
