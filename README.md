@@ -2,6 +2,8 @@
 
 A React single-page application for interacting with any A2A v1.0 compatible agent directly from the browser.
 
+![User experience of the A2A Consumer application](./docs/ux.png)
+
 ## Features
 
 - Configure agent card JSON URL and optional OAuth bearer token.
