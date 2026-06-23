@@ -108,6 +108,111 @@ p {
   background: linear-gradient(180deg, var(--surface), var(--bg-soft));
 }
 
+.connection-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+  align-items: start;
+}
+
+.auth-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-panel-title {
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+}
+
+.auth-mode-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.auth-mode-option {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.auth-mode-option input {
+  margin: 0;
+}
+
+.oauth-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.oauth-scopes-field {
+  grid-column: 1 / -1;
+}
+
+.oauth-actions {
+  grid-column: 1 / -1;
+  align-items: center;
+}
+
+.required-mark {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.oauth-validation {
+  grid-column: 1 / -1;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.84rem;
+}
+
+.oauth-validation p {
+  margin: 0;
+}
+
+.oauth-token-hint {
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.oauth-token-viewer {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.oauth-token-viewer-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.oauth-token-textarea {
+  min-height: 96px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -121,6 +226,12 @@ label {
   gap: 6px;
   font-size: 0.9rem;
   color: var(--text-soft);
+}
+
+.field-label-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 input,
@@ -654,10 +765,15 @@ pre {
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 1024px) {
+  .connection-grid,
   .form-grid,
   .columns,
   .status-grid,
   .wire-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .oauth-grid {
     grid-template-columns: 1fr;
   }
 

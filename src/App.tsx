@@ -18,6 +18,7 @@ import {
 
 type ThemeMode = 'light' | 'dark'
 type AgentTab = 'summary' | 'raw' | 'settings'
+type AuthMode = 'anonymous' | 'bearer' | 'oauth'
 
 type RpcOperation = {
   method: string
@@ -32,6 +33,107 @@ type StreamResponseEntry = {
   source: string
   text: string
   raw: string
+}
+
+type OAuthFormState = {
+  tenantId: string
+  clientId: string
+  clientSecret: string
+  redirectUri: string
+  scopes: string
+}
+
+type PersistedConnectionSettings = {
+  agentCardUrl: string
+  authMode: AuthMode
+  bearerToken: string
+  oauthForm: OAuthFormState
+  oauthAccessToken: string
+  oauthTokenExpiresAt: string
+}
+
+const CONNECTION_SETTINGS_STORAGE_KEY = 'a2a-consumer.connection-settings.v1'
+
+function createDefaultOAuthForm(): OAuthFormState {
+  return {
+    tenantId: '',
+    clientId: '',
+    clientSecret: '',
+    redirectUri: `${window.location.origin}${window.location.pathname}`,
+    scopes: 'openid profile offline_access',
+  }
+}
+
+function createDefaultPersistedSettings(): PersistedConnectionSettings {
+  return {
+    agentCardUrl: '',
+    authMode: 'anonymous',
+    bearerToken: '',
+    oauthForm: createDefaultOAuthForm(),
+    oauthAccessToken: '',
+    oauthTokenExpiresAt: '',
+  }
+}
+
+function sanitizePersistedSettings(payload: unknown): PersistedConnectionSettings {
+  const defaults = createDefaultPersistedSettings()
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return defaults
+  }
+
+  const record = payload as Record<string, unknown>
+  const authModeValue = record.authMode
+  const authMode: AuthMode =
+    authModeValue === 'anonymous' || authModeValue === 'bearer' || authModeValue === 'oauth'
+      ? authModeValue
+      : defaults.authMode
+
+  const oauthFormValue = record.oauthForm
+  const oauthFormRecord =
+    oauthFormValue && typeof oauthFormValue === 'object' && !Array.isArray(oauthFormValue)
+      ? (oauthFormValue as Record<string, unknown>)
+      : {}
+
+  return {
+    agentCardUrl: typeof record.agentCardUrl === 'string' ? record.agentCardUrl : defaults.agentCardUrl,
+    authMode,
+    bearerToken: typeof record.bearerToken === 'string' ? record.bearerToken : defaults.bearerToken,
+    oauthForm: {
+      tenantId:
+        typeof oauthFormRecord.tenantId === 'string' ? oauthFormRecord.tenantId : defaults.oauthForm.tenantId,
+      clientId:
+        typeof oauthFormRecord.clientId === 'string' ? oauthFormRecord.clientId : defaults.oauthForm.clientId,
+      clientSecret:
+        typeof oauthFormRecord.clientSecret === 'string'
+          ? oauthFormRecord.clientSecret
+          : defaults.oauthForm.clientSecret,
+      redirectUri:
+        typeof oauthFormRecord.redirectUri === 'string'
+          ? oauthFormRecord.redirectUri
+          : defaults.oauthForm.redirectUri,
+      scopes: typeof oauthFormRecord.scopes === 'string' ? oauthFormRecord.scopes : defaults.oauthForm.scopes,
+    },
+    oauthAccessToken:
+      typeof record.oauthAccessToken === 'string' ? record.oauthAccessToken : defaults.oauthAccessToken,
+    oauthTokenExpiresAt:
+      typeof record.oauthTokenExpiresAt === 'string'
+        ? record.oauthTokenExpiresAt
+        : defaults.oauthTokenExpiresAt,
+  }
+}
+
+function loadPersistedSettings(): PersistedConnectionSettings {
+  try {
+    const raw = window.localStorage.getItem(CONNECTION_SETTINGS_STORAGE_KEY)
+    if (!raw) {
+      return createDefaultPersistedSettings()
+    }
+
+    const parsed = JSON.parse(raw) as unknown
+    return sanitizePersistedSettings(parsed)
+  } catch {
+    return createDefaultPersistedSettings()
+  }
 }
 
 const OPERATIONS: RpcOperation[] = [
@@ -130,6 +232,56 @@ function createMessageId(): string {
 
 function toPrettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2)
+}
+
+function createOAuthStateValue(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function splitScopes(scopesInput: string): string[] {
+  return scopesInput
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter((scope) => scope.length > 0)
+}
+
+function base64UrlEncode(input: Uint8Array): string {
+  const binary = Array.from(input)
+    .map((byte) => String.fromCharCode(byte))
+    .join('')
+
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function createPkceVerifier(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return base64UrlEncode(bytes)
+}
+
+async function createPkceChallenge(verifier: string): Promise<string> {
+  const encoded = new TextEncoder().encode(verifier)
+  const digest = await crypto.subtle.digest('SHA-256', encoded)
+  return base64UrlEncode(new Uint8Array(digest))
+}
+
+function formatAuthModeLabel(mode: AuthMode): string {
+  if (mode === 'anonymous') {
+    return 'Anonymous'
+  }
+  if (mode === 'bearer') {
+    return 'Bearer Token'
+  }
+  return 'OAuth Flow'
+}
+
+function isLikelyValidUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 function resolveAgentEndpoint(agentCard: Record<string, unknown>, cardUrl: string): string {
@@ -236,12 +388,20 @@ function formatStreamResponseText(payload: unknown): string {
 }
 
 function App() {
+  const initialSettings = useMemo(() => loadPersistedSettings(), [])
   const clientRef = useRef<A2AClient | null>(null)
   const subscriptionsRef = useRef<Record<string, AbortController>>({})
   const mutedResponseTaskIdsRef = useRef<Set<string>>(new Set())
+  const activeAccessTokenRef = useRef('')
   const [theme, setTheme] = useState<ThemeMode>('light')
-  const [agentCardUrl, setAgentCardUrl] = useState('')
-  const [bearerToken, setBearerToken] = useState('')
+  const [agentCardUrl, setAgentCardUrl] = useState(initialSettings.agentCardUrl)
+  const [authMode, setAuthMode] = useState<AuthMode>(initialSettings.authMode)
+  const [bearerToken, setBearerToken] = useState(initialSettings.bearerToken)
+  const [oauthForm, setOauthForm] = useState<OAuthFormState>(initialSettings.oauthForm)
+  const [oauthAccessToken, setOauthAccessToken] = useState(initialSettings.oauthAccessToken)
+  const [oauthTokenExpiresAt, setOauthTokenExpiresAt] = useState(initialSettings.oauthTokenExpiresAt)
+  const [showOauthAccessToken, setShowOauthAccessToken] = useState(false)
+  const [isAuthorizing, setIsAuthorizing] = useState(false)
   const [serviceUrl, setServiceUrl] = useState('')
   const [isConnecting, setIsConnecting] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
@@ -251,7 +411,7 @@ function App() {
   const [validation, setValidation] = useState<AgentCardValidationResult | null>(null)
   const [agentTab, setAgentTab] = useState<AgentTab>('summary')
 
-  const [quickMessage, setQuickMessage] = useState('Hello from A2A SPA')
+  const [quickMessage, setQuickMessage] = useState('')
   const [quickStreaming, setQuickStreaming] = useState(true)
   const [selectedMethod, setSelectedMethod] = useState(OPERATIONS[0].method)
   const [operationParamsText, setOperationParamsText] = useState(
@@ -278,6 +438,56 @@ function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
   }, [theme])
+
+  const activeAccessToken = useMemo(() => {
+    if (authMode === 'anonymous') {
+      return ''
+    }
+
+    if (authMode === 'bearer') {
+      return bearerToken.trim()
+    }
+
+    return oauthAccessToken.trim()
+  }, [authMode, bearerToken, oauthAccessToken])
+
+  const oauthValidationErrors = useMemo(() => {
+    const errors: string[] = []
+    if (oauthForm.tenantId.trim().length === 0) {
+      errors.push('Tenant Id is required.')
+    }
+    if (oauthForm.clientId.trim().length === 0) {
+      errors.push('Client Id is required.')
+    }
+    if (oauthForm.redirectUri.trim().length === 0) {
+      errors.push('Redirect URI is required.')
+    } else if (!isLikelyValidUrl(oauthForm.redirectUri.trim())) {
+      errors.push('Redirect URI must be a valid http/https URL.')
+    }
+    if (splitScopes(oauthForm.scopes).length === 0) {
+      errors.push('At least one scope is required.')
+    }
+    return errors
+  }, [oauthForm])
+
+  const canAuthorizeOAuth = oauthValidationErrors.length === 0
+
+  useEffect(() => {
+    activeAccessTokenRef.current = activeAccessToken
+  }, [activeAccessToken])
+
+  useEffect(() => {
+    const payload: PersistedConnectionSettings = {
+      agentCardUrl,
+      authMode,
+      bearerToken,
+      oauthForm,
+      oauthAccessToken,
+      oauthTokenExpiresAt,
+    }
+
+    window.localStorage.setItem(CONNECTION_SETTINGS_STORAGE_KEY, JSON.stringify(payload))
+  }, [agentCardUrl, authMode, bearerToken, oauthForm, oauthAccessToken, oauthTokenExpiresAt])
 
   const selectedOperation = useMemo(
     () => OPERATIONS.find((op) => op.method === selectedMethod) ?? OPERATIONS[0],
@@ -429,6 +639,218 @@ function App() {
     setStatusMessage('Connection reset. Configure agent card URL and connect again.')
   }
 
+  const handleDisconnect = () => {
+    clearRuntime()
+    setStatusMessage('Disconnected. Connection settings were kept.')
+  }
+
+  const handleFactoryReset = () => {
+    clearRuntime()
+    const defaults = createDefaultPersistedSettings()
+    setAgentCardUrl(defaults.agentCardUrl)
+    setAuthMode(defaults.authMode)
+    setBearerToken(defaults.bearerToken)
+    setOauthForm(defaults.oauthForm)
+    setOauthAccessToken(defaults.oauthAccessToken)
+    setOauthTokenExpiresAt(defaults.oauthTokenExpiresAt)
+    activeAccessTokenRef.current = ''
+    window.localStorage.removeItem(CONNECTION_SETTINGS_STORAGE_KEY)
+    setStatusMessage('Factory reset complete. All saved settings were removed.')
+  }
+
+  const waitForOAuthCode = (popup: Window, redirectUri: string, expectedState: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      let resolved = false
+      const expectedRedirect = new URL(redirectUri)
+      let intervalId: number | undefined
+
+      const finish = (callback: () => void) => {
+        if (resolved) {
+          return
+        }
+        resolved = true
+        if (intervalId !== undefined) {
+          window.clearInterval(intervalId)
+        }
+        try {
+          popup.close()
+        } catch {
+          // Ignore popup close errors.
+        }
+        callback()
+      }
+
+      intervalId = window.setInterval(() => {
+        if (popup.closed) {
+          finish(() => reject(new Error('OAuth popup was closed before authorization completed.')))
+          return
+        }
+
+        try {
+          const currentUrl = new URL(popup.location.href)
+          if (
+            currentUrl.origin !== expectedRedirect.origin ||
+            currentUrl.pathname !== expectedRedirect.pathname
+          ) {
+            return
+          }
+
+          const params = new URLSearchParams(currentUrl.search)
+          const returnedState = params.get('state')
+          if (returnedState !== expectedState) {
+            finish(() => reject(new Error('OAuth state mismatch detected.')))
+            return
+          }
+
+          const authError = params.get('error')
+          if (authError) {
+            const description = params.get('error_description') || authError
+            finish(() => reject(new Error(`OAuth authorize error: ${description}`)))
+            return
+          }
+
+          const code = params.get('code')
+          if (!code) {
+            finish(() => reject(new Error('OAuth authorization code was not returned.')))
+            return
+          }
+
+          finish(() => resolve(code))
+        } catch {
+          // Ignore cross-origin access until the popup returns to redirect URI.
+        }
+      }, 350)
+    })
+  }
+
+  const exchangeCodeForToken = async (
+    authorizationCode: string,
+    scopeText: string,
+    codeVerifier: string,
+  ): Promise<string> => {
+    const tenantId = oauthForm.tenantId.trim()
+    const clientId = oauthForm.clientId.trim()
+    const redirectUri = oauthForm.redirectUri.trim()
+    const tokenEndpoint = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`
+
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: scopeText,
+      code: authorizationCode,
+      code_verifier: codeVerifier,
+    })
+
+    const response = await fetch(tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    })
+
+    const payload = (await response.json()) as Record<string, unknown>
+    if (!response.ok) {
+      const message =
+        (typeof payload.error_description === 'string' && payload.error_description) ||
+        (typeof payload.error === 'string' && payload.error) ||
+        `HTTP ${response.status}`
+      throw new Error(`OAuth token request failed: ${message}`)
+    }
+
+    const accessToken = payload.access_token
+    if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
+      throw new Error('OAuth token response did not include an access_token.')
+    }
+
+    const expiresIn = payload.expires_in
+    if (typeof expiresIn === 'number' && Number.isFinite(expiresIn)) {
+      setOauthTokenExpiresAt(new Date(Date.now() + expiresIn * 1000).toISOString())
+    } else {
+      setOauthTokenExpiresAt('')
+    }
+
+    return accessToken
+  }
+
+  const requestOAuthAccessToken = async (): Promise<string> => {
+    const tenantId = oauthForm.tenantId.trim()
+    const clientId = oauthForm.clientId.trim()
+    const redirectUri = oauthForm.redirectUri.trim()
+    const scopes = splitScopes(oauthForm.scopes)
+
+    if (!tenantId || !clientId || !redirectUri) {
+      throw new Error('OAuth flow requires Tenant Id, Client Id, and Redirect URI.')
+    }
+    if (scopes.length === 0) {
+      throw new Error('OAuth flow requires at least one scope.')
+    }
+
+    const redirectUrl = new URL(redirectUri)
+    if (redirectUrl.origin !== window.location.origin) {
+      throw new Error(
+        'Redirect URI must use the current app origin so the browser can capture the authorization code.',
+      )
+    }
+
+    const authorizeEndpoint = `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`
+    const scopeText = scopes.join(' ')
+    const state = createOAuthStateValue()
+    const codeVerifier = createPkceVerifier()
+    const codeChallenge = await createPkceChallenge(codeVerifier)
+    const authorizeUrl = new URL(authorizeEndpoint)
+    authorizeUrl.searchParams.set('client_id', clientId)
+    authorizeUrl.searchParams.set('response_type', 'code')
+    authorizeUrl.searchParams.set('redirect_uri', redirectUri)
+    authorizeUrl.searchParams.set('response_mode', 'query')
+    authorizeUrl.searchParams.set('scope', scopeText)
+    authorizeUrl.searchParams.set('state', state)
+    authorizeUrl.searchParams.set('code_challenge', codeChallenge)
+    authorizeUrl.searchParams.set('code_challenge_method', 'S256')
+
+    const popup = window.open(authorizeUrl.toString(), 'a2a-oauth-authorize', 'popup,width=540,height=720')
+    if (!popup) {
+      throw new Error('Unable to open OAuth popup. Allow popups and try again.')
+    }
+
+    const authorizationCode = await waitForOAuthCode(popup, redirectUri, state)
+    const accessToken = await exchangeCodeForToken(authorizationCode, scopeText, codeVerifier)
+    setOauthAccessToken(accessToken)
+    return accessToken
+  }
+
+  const handleAuthorizeOAuth = async () => {
+    setConnectionError('')
+    setIsAuthorizing(true)
+    setStatusMessage('Starting OAuth authorization flow...')
+
+    try {
+      const accessToken = await requestOAuthAccessToken()
+      activeAccessTokenRef.current = accessToken
+      setStatusMessage('OAuth access token acquired.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'OAuth authorization failed.'
+      setConnectionError(message)
+      setStatusMessage('OAuth authorization failed.')
+    } finally {
+      setIsAuthorizing(false)
+    }
+  }
+
+  const handleCopyOauthAccessToken = async () => {
+    if (!oauthAccessToken) {
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(oauthAccessToken)
+      setStatusMessage('OAuth access token copied to clipboard.')
+    } catch {
+      setConnectionError('Unable to copy token automatically. Select and copy it manually.')
+    }
+  }
+
   const handleConnect = async () => {
     setConnectionError('')
     setStatusMessage('Connecting to agent...')
@@ -442,9 +864,27 @@ function App() {
     setIsConnecting(true)
 
     try {
+      let accessToken = ''
+      if (authMode === 'bearer') {
+        accessToken = bearerToken.trim()
+        if (accessToken.length === 0) {
+          throw new Error('Bearer token mode requires a token value.')
+        }
+      }
+
+      if (authMode === 'oauth') {
+        accessToken = oauthAccessToken.trim()
+        if (accessToken.length === 0) {
+          setStatusMessage('Running OAuth flow before connecting...')
+          accessToken = await requestOAuthAccessToken()
+        }
+      }
+
+      activeAccessTokenRef.current = accessToken
+
       const client = new A2AClient({
         serviceUrl: trimmedCardUrl,
-        bearerToken: bearerToken.trim(),
+        getAccessToken: () => activeAccessTokenRef.current,
         onWireLog: handleWireLog,
       })
 
@@ -457,7 +897,7 @@ function App() {
       const resolvedEndpoint = resolveAgentEndpoint(cardObject, trimmedCardUrl)
       const runtimeClient = new A2AClient({
         serviceUrl: resolvedEndpoint,
-        bearerToken: bearerToken.trim(),
+        getAccessToken: () => activeAccessTokenRef.current,
         onWireLog: handleWireLog,
       })
 
@@ -705,7 +1145,7 @@ function App() {
           >
             Theme: {theme}
           </button>
-          <button type="button" className="small-btn danger" onClick={clearRuntime}>
+          <button type="button" className="small-btn danger" onClick={handleFactoryReset}>
             Reset
           </button>
         </div>
@@ -713,7 +1153,7 @@ function App() {
 
       <section className="panel connection-panel">
         <h2>Connection</h2>
-        <div className="form-grid">
+        <div className="connection-grid">
           <label>
             Agent Card JSON URL
             <input
@@ -723,20 +1163,198 @@ function App() {
               onChange={(event) => setAgentCardUrl(event.target.value)}
             />
           </label>
-          <label>
-            OAuth Bearer Token (optional)
-            <input
-              type="password"
-              placeholder="eyJ..."
-              value={bearerToken}
-              onChange={(event) => setBearerToken(event.target.value)}
-            />
-          </label>
+
+          <div className="auth-panel" role="group" aria-label="Authentication configuration">
+            <p className="auth-panel-title">Authentication</p>
+            <div className="auth-mode-row" role="radiogroup" aria-label="Authentication options">
+              <label className="auth-mode-option">
+                <input
+                  type="radio"
+                  name="auth-mode"
+                  checked={authMode === 'anonymous'}
+                  onChange={() => setAuthMode('anonymous')}
+                />
+                Anonymous
+              </label>
+              <label className="auth-mode-option">
+                <input
+                  type="radio"
+                  name="auth-mode"
+                  checked={authMode === 'bearer'}
+                  onChange={() => setAuthMode('bearer')}
+                />
+                Bearer Token
+              </label>
+              <label className="auth-mode-option">
+                <input
+                  type="radio"
+                  name="auth-mode"
+                  checked={authMode === 'oauth'}
+                  onChange={() => setAuthMode('oauth')}
+                />
+                OAuth Flow
+              </label>
+            </div>
+
+            {authMode === 'bearer' && (
+              <label>
+                Bearer token value
+                <input
+                  type="password"
+                  placeholder="eyJ..."
+                  value={bearerToken}
+                  onChange={(event) => setBearerToken(event.target.value)}
+                />
+              </label>
+            )}
+
+            {authMode === 'oauth' && (
+              <div className="oauth-grid">
+                <label>
+                  <span className="field-label-text">
+                    Tenant Id <span className="required-mark" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="contoso.onmicrosoft.com or tenant GUID"
+                    value={oauthForm.tenantId}
+                    required
+                    aria-required="true"
+                    onChange={(event) =>
+                      setOauthForm((current) => ({ ...current, tenantId: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span className="field-label-text">
+                    Client Id <span className="required-mark" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="Application (client) ID"
+                    value={oauthForm.clientId}
+                    required
+                    aria-required="true"
+                    onChange={(event) =>
+                      setOauthForm((current) => ({ ...current, clientId: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  Client Secret
+                  <input
+                    type="password"
+                    placeholder="Optional for browser PKCE flow"
+                    value={oauthForm.clientSecret}
+                    onChange={(event) =>
+                      setOauthForm((current) => ({ ...current, clientSecret: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span className="field-label-text">
+                    Redirect URI <span className="required-mark" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    type="url"
+                    placeholder="Must match current app origin"
+                    value={oauthForm.redirectUri}
+                    required
+                    aria-required="true"
+                    onChange={(event) =>
+                      setOauthForm((current) => ({ ...current, redirectUri: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="oauth-scopes-field">
+                  <span className="field-label-text">
+                    Scopes <span className="required-mark" aria-hidden="true">*</span>
+                  </span>
+                  <textarea
+                    rows={2}
+                    placeholder="openid profile offline_access api://your-app/.default"
+                    value={oauthForm.scopes}
+                    required
+                    aria-required="true"
+                    onChange={(event) =>
+                      setOauthForm((current) => ({ ...current, scopes: event.target.value }))
+                    }
+                  />
+                </label>
+
+                {oauthValidationErrors.length > 0 && (
+                  <div className="oauth-validation" role="alert">
+                    {oauthValidationErrors.map((error) => (
+                      <p key={error}>{error}</p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="row-actions oauth-actions">
+                  <button
+                    type="button"
+                    className="small-btn"
+                    onClick={handleAuthorizeOAuth}
+                    disabled={isConnecting || busy || isAuthorizing || !canAuthorizeOAuth}
+                  >
+                    {isAuthorizing ? 'Authorizing...' : 'Authorize & Get Token'}
+                  </button>
+                  <p className="oauth-token-hint">
+                    {oauthAccessToken
+                      ? `Token acquired${oauthTokenExpiresAt ? ` (expires ${new Date(oauthTokenExpiresAt).toLocaleString()})` : ''}`
+                      : 'No OAuth token acquired yet.'}
+                  </p>
+                </div>
+
+                {oauthAccessToken && (
+                  <div className="oauth-token-viewer">
+                    <div className="oauth-token-viewer-header">
+                      <button
+                        type="button"
+                        className="small-btn"
+                        onClick={() => setShowOauthAccessToken((current) => !current)}
+                      >
+                        {showOauthAccessToken ? 'Hide Access Token' : 'Show Access Token'}
+                      </button>
+                      {showOauthAccessToken && (
+                        <button
+                          type="button"
+                          className="small-btn"
+                          onClick={handleCopyOauthAccessToken}
+                        >
+                          Copy Token
+                        </button>
+                      )}
+                    </div>
+
+                    {showOauthAccessToken && (
+                      <textarea
+                        className="oauth-token-textarea"
+                        rows={4}
+                        readOnly
+                        value={oauthAccessToken}
+                        onFocus={(event) => event.currentTarget.select()}
+                        aria-label="Retrieved OAuth access token"
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="row-actions">
-          <button type="button" onClick={handleConnect} disabled={isConnecting || busy}>
+          <button type="button" onClick={handleConnect} disabled={isConnecting || busy || isAuthorizing}>
             {isConnecting ? 'Connecting...' : 'Connect'}
+          </button>
+          <button
+            type="button"
+            className="small-btn"
+            onClick={handleDisconnect}
+            disabled={isConnecting || busy || isAuthorizing || !isConnected}
+          >
+            Disconnect
           </button>
         </div>
 
@@ -749,6 +1367,9 @@ function App() {
           </p>
           <p>
             <strong>Runtime:</strong> {statusMessage}
+          </p>
+          <p>
+            <strong>Auth Mode:</strong> {formatAuthModeLabel(authMode)}
           </p>
         </div>
 

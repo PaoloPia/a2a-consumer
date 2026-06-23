@@ -224,6 +224,7 @@ export function extractOrderedChatSegments(payload: unknown): StreamChatSegment[
 type A2AClientConfig = {
   serviceUrl: string
   bearerToken?: string
+  getAccessToken?: () => string | undefined
   onWireLog?: (entry: WireLogEntry) => void
 }
 
@@ -307,12 +308,23 @@ function pushWireLog(
 export class A2AClient {
   private readonly serviceUrl: string
   private readonly bearerToken: string
+  private readonly getAccessToken?: () => string | undefined
   private readonly onWireLog?: (entry: WireLogEntry) => void
 
   constructor(config: A2AClientConfig) {
     this.serviceUrl = normalizeBaseUrl(config.serviceUrl.trim())
     this.bearerToken = config.bearerToken?.trim() ?? ''
+    this.getAccessToken = config.getAccessToken
     this.onWireLog = config.onWireLog
+  }
+
+  private resolveAccessToken(): string {
+    const tokenFromProvider = this.getAccessToken?.()?.trim() ?? ''
+    if (tokenFromProvider.length > 0) {
+      return tokenFromProvider
+    }
+
+    return this.bearerToken
   }
 
   async fetchAgentCard(cardUrl: string): Promise<unknown> {
@@ -326,8 +338,9 @@ export class A2AClient {
     // that CORS-enabled servers generally allow.
     const headers = new Headers()
     headers.set('Accept', 'application/json, application/a2a+json')
-    if (this.bearerToken.length > 0) {
-      headers.set('Authorization', `Bearer ${this.bearerToken}`)
+    const accessToken = this.resolveAccessToken()
+    if (accessToken.length > 0) {
+      headers.set('Authorization', `Bearer ${accessToken}`)
     }
 
     let response: Response
@@ -547,8 +560,9 @@ export class A2AClient {
       headers.set('Content-Type', options.contentType)
     }
 
-    if (this.bearerToken.length > 0) {
-      headers.set('Authorization', `Bearer ${this.bearerToken}`)
+    const accessToken = this.resolveAccessToken()
+    if (accessToken.length > 0) {
+      headers.set('Authorization', `Bearer ${accessToken}`)
     }
 
     return headers
