@@ -52,3 +52,4 @@ npm run preview  # preview the production build locally
 - [`docs/FUNCTIONALITIES.md`](docs/FUNCTIONALITIES.md)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/IMPLEMENTATION_DETAILS.md`](docs/IMPLEMENTATION_DETAILS.md)
+- [`docs/ENTRA_ID_OAUTH_APP_REGISTRATION.md`](docs/ENTRA_ID_OAUTH_APP_REGISTRATION.md)
