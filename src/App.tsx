@@ -429,10 +429,16 @@ function App() {
   const [mutedResponseTaskIds, setMutedResponseTaskIds] = useState<string[]>([])
   const [showResponsesPanel, setShowResponsesPanel] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const chatScrollAnchor = useRef<HTMLDivElement>(null)
+  const chatMessagesContainerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    chatScrollAnchor.current?.scrollIntoView({ behavior: 'smooth' })
+    const container = chatMessagesContainerRef.current
+    if (!container) {
+      return
+    }
+
+    // Keep autoscroll scoped to the chat panel to avoid page-level jumps.
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   }, [chatMessages])
 
   useEffect(() => {
@@ -1481,7 +1487,7 @@ function App() {
               </button>
             </div>
 
-            <div className="chat-messages">
+            <div className="chat-messages" ref={chatMessagesContainerRef}>
               {chatMessages.length === 0 && (
                 <p className="chat-empty">Send a message to start the conversation.</p>
               )}
@@ -1507,7 +1513,6 @@ function App() {
                   </time>
                 </div>
               ))}
-              <div ref={chatScrollAnchor} />
             </div>
 
             <div className="chat-input-row">
